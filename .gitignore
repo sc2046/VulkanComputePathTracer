@@ -37,8 +37,8 @@
 build/*
 build/
 bin/
-#external/*
-#external/
+external/*
+external/
 out/
 lib/
 #x64/
