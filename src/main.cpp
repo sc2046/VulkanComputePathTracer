@@ -73,16 +73,16 @@ int main()
     }
     vkb::Device vkb_device = dev_ret.value();
     VkDevice device = vkb_device.device;
-    
     std::cout << "Vulkan logical device created successfully!\n";
 
     // Create memory allocator.
-    VmaAllocatorCreateInfo allocatorInfo = {};
-    allocatorInfo.physicalDevice    = physicalDevice;
-    allocatorInfo.device            = device;
-    allocatorInfo.instance          = instance;
+    VmaAllocatorCreateInfo allocatorInfo = {
+        .physicalDevice = physicalDevice,
+        .device         = device,
+        .instance       = instance
+    };
     VmaAllocator allocator;
-    VkResult result = vmaCreateAllocator(&allocatorInfo, &allocator);
+    auto result = vmaCreateAllocator(&allocatorInfo, &allocator);
     if (result != VK_SUCCESS) {
         std::cerr << std::format("Failed to create VmaAllocator: {}\n", string_VkResult(result));
     }
@@ -110,18 +110,101 @@ int main()
     };
 
     // Set memory properties for the buffer.
-    VmaAllocationCreateInfo allocInfo = {};
-    allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
-    allocInfo.requiredFlags = 
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT     | // Specify that the buffer may be mapped. 
-        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT    | // 
-        VK_MEMORY_PROPERTY_HOST_CACHED_BIT;       // Without this flag, every read of the buffer's memory requires a fetch from GPU memory!
-    allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VmaAllocationCreateInfo allocInfo = {
+        .flags          = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+        .usage          = VMA_MEMORY_USAGE_AUTO,
+        .requiredFlags  =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT  | // Specify that the buffer may be mapped. 
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | // 
+            VK_MEMORY_PROPERTY_HOST_CACHED_BIT     // Without this flag, every read of the buffer's memory requires a fetch from GPU memory!
+    };
 
     // Create a buffer.
     VkBuffer buffer;
     VmaAllocation bufferAllocation;
     vmaCreateBuffer(allocator, &bufferCreateInfo, &allocInfo, &buffer, &bufferAllocation, nullptr);
+
+    // Create command pool for the compute queue.
+    VkCommandPoolCreateInfo commanddPoolCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .queueFamilyIndex = compute_queue_index,
+    };
+    VkCommandPool commandPool;
+    result = vkCreateCommandPool(device, &commanddPoolCreateInfo, nullptr, &commandPool);
+    if (result != VK_SUCCESS) {
+        std::cerr << std::format("Failed to create Command pool: {}\n", string_VkResult(result));
+    }
+    std::cout << "Command pool created successfully!\n";
+
+    //Allocate a command buffer from the pool.
+    VkCommandBufferAllocateInfo commandBufferAllocateInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = commandPool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1
+    };
+    VkCommandBuffer commandBuffer;
+    result = vkAllocateCommandBuffers(device, &commandBufferAllocateInfo,&commandBuffer);
+    if (result != VK_SUCCESS) {
+        std::cerr << std::format("Failed to create Command buffer: {}\n", string_VkResult(result));
+    }
+    std::cout << "Command buffer created successfully!\n";
+
+
+    VkCommandBufferBeginInfo commandBufferBeginInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT // After submitting it we will re-record it before submitting again.
+    };
+    result = vkBeginCommandBuffer(commandBuffer, &commandBufferBeginInfo);
+    if (result != VK_SUCCESS) {
+        std::cerr << std::format("Failed to begin recording Command buffer: {}\n", string_VkResult(result));
+    }
+    std::cout << "Recording has begun!\n";
+
+    const float fillValue = 0.5f;
+    const uint32_t& fillValueU32 = reinterpret_cast<const uint32_t&>(fillValue);
+    vkCmdFillBuffer(commandBuffer, buffer, 0, bufferSizeBytes, fillValueU32);
+
+
+    // Insert a pipeline barrier that ensures GPU memory writes are available for the CPU to read.
+    VkMemoryBarrier memoryBarrier = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,  // Make transfer writes
+        .dstAccessMask = VK_ACCESS_HOST_READ_BIT       // Readable by the CPU
+    };
+    vkCmdPipelineBarrier(commandBuffer,                                // The command buffer
+        VK_PIPELINE_STAGE_TRANSFER_BIT,           // From the transfer stage
+        VK_PIPELINE_STAGE_HOST_BIT,               // To the CPU
+        0,                                        // No special flags
+        1, &memoryBarrier,                        // Pass the single global memory barrier.
+        0, nullptr, 0, nullptr);                  // No image/buffer memory barriers.
+
+    // End recording of command buffer
+    result = vkEndCommandBuffer(commandBuffer);
+    if (result != VK_SUCCESS) {
+        std::cerr << std::format("Failed to end recording Command buffer: {}\n", string_VkResult(result));
+    }
+    std::cout << "Recording has ended!\n";
+
+    // Submit command buffer to queue.
+    VkSubmitInfo submitInfo = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &commandBuffer
+    };
+    result = vkQueueSubmit(compute_queue, 1, &submitInfo, VK_NULL_HANDLE);
+    if (result != VK_SUCCESS) {
+        std::cerr << std::format("Failed to submit Command buffer to queue: {}\n", string_VkResult(result));
+    }
+    std::cout << "Command buffer has been submitted to compute queue!\n";
+
+    // Synchronise:  Block until queue has no more work to do.
+    // Note that it is not enough alone. This is why we inserted a pipeline barrier.
+    result = vkQueueWaitIdle(compute_queue);
+    if (result != VK_SUCCESS) {
+        std::cerr << std::format("Failed to finish processing compute queue: {}\n", string_VkResult(result));
+    }
+    std::cout << "Compute queue has finished processing command buffer!\n";
 
     // Map data from GPU to CPU to read it.
     void* mappedData;
@@ -133,7 +216,8 @@ int main()
 
 
 
-
+    vkFreeCommandBuffers(vkb_device, commandPool, 1, &commandBuffer);
+    vkDestroyCommandPool(vkb_device, commandPool, nullptr);
     vmaDestroyBuffer(allocator, buffer, bufferAllocation);
     vmaDestroyAllocator(allocator);
     vkb::destroy_device(vkb_device);
