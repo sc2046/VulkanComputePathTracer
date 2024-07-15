@@ -1,7 +1,7 @@
 ﻿
 
 # Add source to this project's executable.
-add_executable (VulkanComputePathTracer "main.cpp")
+add_executable (VulkanComputePathTracer "main.cpp" )
 
 add_custom_command(
 	TARGET VulkanComputePathTracer POST_BUILD 

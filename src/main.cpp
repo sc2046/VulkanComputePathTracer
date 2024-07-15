@@ -171,13 +171,87 @@ int main()
         .pName = "main"
     };
 
+    // Configure descriptor sets.
+    
+    // Specify the type (SSBO) and binding location (0) of the single entry in the descriptor set we will use.
+    VkDescriptorSetLayoutBinding descriptorSetLayoutBinding0{
+        .binding = 0,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT
+    };
+    VkDescriptorSetLayoutCreateInfo descriptorSetLayoutInfo{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1,
+        .pBindings = &descriptorSetLayoutBinding0
+    };
+    VkDescriptorSetLayout descriptorSetLayout;
+    result = vkCreateDescriptorSetLayout(device, &descriptorSetLayoutInfo, nullptr, &descriptorSetLayout);
+    if (result != VK_SUCCESS) {
+        std::cerr << std::format("Failed to create descriptor set layout!: {}\n", string_VkResult(result));
+    }
+
+    // Create descriptor pool.
+    // For our app, the only type of resource we be using is SSBO, and will only need at most 1 combined over all sets. 
+    VkDescriptorPoolSize SSBOPoolSize{
+        .type               = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .descriptorCount    = 1
+    };
+    VkDescriptorPoolCreateInfo descriptorPoolCreateInfo{
+        .sType          = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets        = 1, //Only need one descriptor set to be allocated.
+        .poolSizeCount  = 1,
+        .pPoolSizes     = &SSBOPoolSize
+    };
+    VkDescriptorPool descriptorPool;
+    result = vkCreateDescriptorPool(device, &descriptorPoolCreateInfo, nullptr, &descriptorPool);
+    if (result != VK_SUCCESS) {
+        std::cerr << std::format("Failed to create descriptor set pool!: {}\n", string_VkResult(result));
+    }
+
+    // Allocate descriptor set from the pool.
+    VkDescriptorSetAllocateInfo descriptorSetAllocateInfo{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = descriptorPool,
+        .descriptorSetCount = 1,
+        .pSetLayouts = &descriptorSetLayout
+    };
+    VkDescriptorSet descriptorSet;
+    result = vkAllocateDescriptorSets(device, &descriptorSetAllocateInfo,&descriptorSet);
+    if (result != VK_SUCCESS) {
+        std::cerr << std::format("Failed to allocate descriptor set!: {}\n", string_VkResult(result));
+    }
+
+    // Update descriptor with the buffer we created.
+    VkDescriptorBufferInfo descriptorBufferInfo{
+        .buffer = buffer,    // The VkBuffer object
+        .offset = 0,
+        .range  = bufferSizeBytes  // The length of memory to bind; offset is 0.
+    };
+    // Fill the descriptor sets with resources.
+    VkWriteDescriptorSet descriptorWrite{
+        .sType              = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet             = descriptorSet,
+        .dstBinding         = 0,
+        .dstArrayElement    = 0,
+        .descriptorCount    = 1,
+        .descriptorType     = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .pBufferInfo = &descriptorBufferInfo
+    };
+    vkUpdateDescriptorSets(
+        device,
+        1, &descriptorWrite,  // An array of VkWriteDescriptorSet objects
+        0, nullptr);          // An array of VkCopyDescriptorSet objects (unused)
+
+
     // Create the compute pipeline for the app.
     // A compute pipeline is essentially just a compute shader.
 
     // Layout for the pipeline.
     VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 0,
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount         = 1,
+        .pSetLayouts            = &descriptorSetLayout,
         .pushConstantRangeCount = 0
     };
     VkPipelineLayout computePipelineLayout;
@@ -187,8 +261,8 @@ int main()
     }
     // Create the pipeline.
     VkComputePipelineCreateInfo pipelineCreateInfo{
-        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .stage = computeShaderStageCreateInfo,
+        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage  = computeShaderStageCreateInfo,
         .layout = computePipelineLayout
     }; 
     VkPipeline computePipeline;
@@ -196,12 +270,15 @@ int main()
         VK_NULL_HANDLE,          // Pipeline cache (uses default)
         1, &pipelineCreateInfo,  // Compute pipeline create info
         VK_NULL_HANDLE,          // Allocator (uses default)
-        &computePipeline);      // Output
+        &computePipeline
+    );      // Output
+
+
 
     // Create command pool for the compute queue.
     VkCommandPoolCreateInfo commanddPoolCreateInfo = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-        .queueFamilyIndex = compute_queue_index,
+        .sType              = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .queueFamilyIndex   = compute_queue_index,
     };
     VkCommandPool commandPool;
     result = vkCreateCommandPool(device, &commanddPoolCreateInfo, nullptr, &commandPool);
@@ -212,9 +289,9 @@ int main()
 
     //Allocate a command buffer from the pool.
     VkCommandBufferAllocateInfo commandBufferAllocateInfo = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = commandPool,
-        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool        = commandPool,
+        .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
         .commandBufferCount = 1
     };
     VkCommandBuffer commandBuffer;
@@ -237,14 +314,22 @@ int main()
 
     // Bind the compute pipeline and dispatch the compute shader.
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
-    vkCmdDispatch(commandBuffer, 1, 1, 1);
+    // Bind the descriptor set
+    vkCmdBindDescriptorSets(commandBuffer, 
+        VK_PIPELINE_BIND_POINT_COMPUTE,
+        computePipelineLayout,
+        0, 1,               //Index of starting set to bind to
+        &descriptorSet,     //Pointer to array of sets to bind.
+        0, nullptr);
+    vkCmdDispatch(commandBuffer, (uint32_t(kImageWidth) + kWorkGroupSizeX - 1) / kWorkGroupSizeX,
+        (uint32_t(kImageHeight) + kWorkGroupSizeY- 1) / kWorkGroupSizeY, 1);
 
 
     // Insert a pipeline barrier that ensures GPU memory writes are available for the CPU to read.
     VkMemoryBarrier memoryBarrier = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,  // Make shader writes
-        .dstAccessMask = VK_ACCESS_HOST_READ_BIT       // Readable by the CPU
+        .sType          = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask  = VK_ACCESS_SHADER_WRITE_BIT,  // Make shader writes
+        .dstAccessMask  = VK_ACCESS_HOST_READ_BIT       // Readable by the CPU
     };
     vkCmdPipelineBarrier(commandBuffer,                                // The command buffer
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,           // From the transfer stage
@@ -262,9 +347,9 @@ int main()
 
     // Submit command buffer to queue.
     VkSubmitInfo submitInfo = {
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .commandBufferCount = 1,
-        .pCommandBuffers = &commandBuffer
+        .pCommandBuffers    = &commandBuffer
     };
     result = vkQueueSubmit(compute_queue, 1, &submitInfo, VK_NULL_HANDLE);
     if (result != VK_SUCCESS) {
@@ -291,6 +376,8 @@ int main()
     vkDestroyPipeline(device, computePipeline, nullptr);
     vkDestroyShaderModule(device, computeShaderModule, nullptr);
     vkDestroyPipelineLayout(device, computePipelineLayout, nullptr);  
+    vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
+    vkDestroyDescriptorPool(device, descriptorPool, nullptr);
     vkFreeCommandBuffers(vkb_device, commandPool, 1, &commandBuffer);
     vkDestroyCommandPool(vkb_device, commandPool, nullptr);
     vmaDestroyBuffer(allocator, buffer, bufferAllocation);
