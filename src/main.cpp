@@ -6,6 +6,7 @@
 #include <glm.hpp>
 
 #include <format>
+#include <fstream>
 #include <iostream>
 
 #include <vulkan/vulkan.h>
@@ -20,6 +21,27 @@
 
 static constexpr uint32_t kImageWidth{ 800 };
 static constexpr uint32_t kImageHeight{ 600 };
+
+static constexpr uint32_t kWorkGroupSizeX{ 16 };
+static constexpr uint32_t kWorkGroupSizeY{ 8 };
+
+// Loads binary data from a file
+std::vector<char> readFile(const std::string& filename) {
+    std::ifstream file(filename, std::ios::ate | std::ios::binary);
+
+    if (!file.is_open()) {
+        throw std::runtime_error("failed to open file!");
+    }
+
+    size_t fileSize = (size_t)file.tellg();
+    std::vector<char> buffer(fileSize);
+
+    file.seekg(0);
+    file.read(buffer.data(), fileSize);
+    return buffer;
+}
+
+
 
 
 int main()
@@ -127,6 +149,55 @@ int main()
     VmaAllocation bufferAllocation;
     vmaCreateBuffer(allocator, &bufferCreateInfo, &allocInfo, &buffer, &bufferAllocation, nullptr);
 
+    // Create shader module.
+    const auto shaderByteCode = readFile("shaders/compute.spv");
+    VkShaderModuleCreateInfo shaderModuleCreateInfo{
+    .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+    .flags = {},
+    .codeSize = shaderByteCode.size(),
+    .pCode = reinterpret_cast<const uint32_t*>(shaderByteCode.data())
+    };
+    VkShaderModule computeShaderModule;
+    if (vkCreateShaderModule(device, &shaderModuleCreateInfo, nullptr, &computeShaderModule) != VK_SUCCESS) {
+        std::cerr << std::format("Failed to create shader module: {}\n", string_VkResult(result));
+    }
+    std::cout << "Shader module created successfully!\n";
+
+    // Assign shader module to compute shader stage.
+    VkPipelineShaderStageCreateInfo computeShaderStageCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = computeShaderModule,
+        .pName = "main"
+    };
+
+    // Create the compute pipeline for the app.
+    // A compute pipeline is essentially just a compute shader.
+
+    // Layout for the pipeline.
+    VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 0,
+        .pushConstantRangeCount = 0
+    };
+    VkPipelineLayout computePipelineLayout;
+    result = vkCreatePipelineLayout(device, &pipelineLayoutCreateInfo, VK_NULL_HANDLE, &computePipelineLayout);
+    if (result != VK_SUCCESS) {
+        std::cerr << std::format("Failed to create compute pipeline layout!: {}\n", string_VkResult(result));
+    }
+    // Create the pipeline.
+    VkComputePipelineCreateInfo pipelineCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage = computeShaderStageCreateInfo,
+        .layout = computePipelineLayout
+    }; 
+    VkPipeline computePipeline;
+    vkCreateComputePipelines(device,                 // Device
+        VK_NULL_HANDLE,          // Pipeline cache (uses default)
+        1, &pipelineCreateInfo,  // Compute pipeline create info
+        VK_NULL_HANDLE,          // Allocator (uses default)
+        &computePipeline);      // Output
+
     // Create command pool for the compute queue.
     VkCommandPoolCreateInfo commanddPoolCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -164,19 +235,19 @@ int main()
     }
     std::cout << "Recording has begun!\n";
 
-    const float fillValue = 0.5f;
-    const uint32_t& fillValueU32 = reinterpret_cast<const uint32_t&>(fillValue);
-    vkCmdFillBuffer(commandBuffer, buffer, 0, bufferSizeBytes, fillValueU32);
+    // Bind the compute pipeline and dispatch the compute shader.
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
+    vkCmdDispatch(commandBuffer, 1, 1, 1);
 
 
     // Insert a pipeline barrier that ensures GPU memory writes are available for the CPU to read.
     VkMemoryBarrier memoryBarrier = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,  // Make transfer writes
+        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,  // Make shader writes
         .dstAccessMask = VK_ACCESS_HOST_READ_BIT       // Readable by the CPU
     };
     vkCmdPipelineBarrier(commandBuffer,                                // The command buffer
-        VK_PIPELINE_STAGE_TRANSFER_BIT,           // From the transfer stage
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,           // From the transfer stage
         VK_PIPELINE_STAGE_HOST_BIT,               // To the CPU
         0,                                        // No special flags
         1, &memoryBarrier,                        // Pass the single global memory barrier.
@@ -217,7 +288,9 @@ int main()
 
 
 
-
+    vkDestroyPipeline(device, computePipeline, nullptr);
+    vkDestroyShaderModule(device, computeShaderModule, nullptr);
+    vkDestroyPipelineLayout(device, computePipelineLayout, nullptr);  
     vkFreeCommandBuffers(vkb_device, commandPool, 1, &commandBuffer);
     vkDestroyCommandPool(vkb_device, commandPool, nullptr);
     vmaDestroyBuffer(allocator, buffer, bufferAllocation);

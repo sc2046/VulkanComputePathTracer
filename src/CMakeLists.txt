@@ -3,6 +3,12 @@
 # Add source to this project's executable.
 add_executable (VulkanComputePathTracer "main.cpp")
 
+add_custom_command(
+	TARGET VulkanComputePathTracer POST_BUILD 
+	COMMAND ${CMAKE_COMMAND} -E copy_directory #recursively copy
+	${CMAKE_SOURCE_DIR}/src/shaders 
+	$<TARGET_FILE_DIR:VulkanComputePathTracer>/shaders)
+set_property(TARGET VulkanComputePathTracer PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/bin/$(Configuration)")
 
 target_link_libraries(VulkanComputePathTracer glfw)
 target_link_libraries(VulkanComputePathTracer vk-bootstrap)
