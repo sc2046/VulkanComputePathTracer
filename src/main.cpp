@@ -14,6 +14,9 @@
 #define VMA_IMPLEMENTATION
 #include "vk_mem_alloc.h"
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include <stb_image_write.h>
+
 
 static constexpr uint32_t kImageWidth{ 800 };
 static constexpr uint32_t kImageHeight{ 600 };
@@ -207,10 +210,9 @@ int main()
     std::cout << "Compute queue has finished processing command buffer!\n";
 
     // Map data from GPU to CPU to read it.
-    void* mappedData;
-    vmaMapMemory(allocator, bufferAllocation, &mappedData);
-    float* fltData = reinterpret_cast<float*>(mappedData);
-    printf("First three elements: %f, %f, %f\n", fltData[0], fltData[1], fltData[2]);
+    void* pData;
+    vmaMapMemory(allocator, bufferAllocation, &pData);
+    stbi_write_hdr("out.hdr", kImageWidth, kImageHeight, 3, reinterpret_cast<float*>(pData));
     vmaUnmapMemory(allocator, bufferAllocation);
 
 
