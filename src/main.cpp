@@ -53,7 +53,12 @@ int main()
     // Setup memory allocator.
     VmaAllocator        allocator   = initAllocator(context);
 
-    // Set properties for the buffer object.
+    /*
+    * ==============================================================================================
+    * Create a buffer that will eventually be used as a write-only SSBO for the compute shader.
+    * ==============================================================================================
+    */
+
     VkDeviceSize bufferSizeBytes = kImageWidth * kImageHeight * 3 * sizeof(float);
     VkBufferCreateInfo bufferCreateInfo = {
         .sType                  = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -70,16 +75,19 @@ int main()
             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | // 
             VK_MEMORY_PROPERTY_HOST_CACHED_BIT     // Without this flag, every read of the buffer's memory requires a fetch from GPU memory!
     };
-
-    // Create a buffer.
+    // Construct the buffer.
     VkBuffer buffer;
     VmaAllocation bufferAllocation;
     vmaCreateBuffer(allocator, &bufferCreateInfo, &allocInfo, &buffer, &bufferAllocation, nullptr);
 
-    // Create shader module.
-    VkShaderModule computeShaderModule = createShaderModule(context, "shaders/rayTrace.spv");
 
-    // Assign shader module to compute shader stage.
+    /*
+    * ==============================================================================================
+    * Load in a compute shader.
+    * ==============================================================================================
+    */
+    VkShaderModule computeShaderModule = createShaderModule(context, "shaders/rayTrace.spv");
+    // Assign module to the compute stage.
     VkPipelineShaderStageCreateInfo computeShaderStageCreateInfo{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -87,15 +95,21 @@ int main()
         .pName = "main"
     };
 
-    // Configure descriptor sets.
+    /*
+    * ==============================================================================================
+    * Configure descriptor sets. 
+    * For now (ch. 1-7) our pipeline only uses a single resource, the SSBO that image data is written to.
+    * ==============================================================================================
+    */
     
-    // Specify the type (SSBO) and binding location (0) of the single entry in the descriptor set we will use.
+    // Configure binding location 0 of this (and the only) descriptor set.
     VkDescriptorSetLayoutBinding descriptorSetLayoutBinding0{
         .binding = 0,
         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         .descriptorCount = 1,
         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT
     };
+    // Use binding information to define the layout of the descriptor set.
     VkDescriptorSetLayoutCreateInfo descriptorSetLayoutInfo{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .bindingCount = 1,
@@ -107,16 +121,25 @@ int main()
         std::cerr << std::format("Failed to create descriptor set layout!: {}\n", string_VkResult(result));
     }
 
-    // Create descriptor pool.
-    // For our app, the only type of resource we be using is SSBO, and will only need at most 1 combined over all sets. 
+    /*
+    * ==============================================================================================
+    * Create a descriptor pool. 
+    * Allocate the necessary descriptor sets from it.
+    * Update descriptor sets with their resources.
+    * ==============================================================================================
+    */
+
+    // First we provide the pool with info about what resources will be used, and how many of each.
+    // For now (ch. 1-7), we only use one type of resource (SSBO). 
+    // Over all sets, the max number of resources of this type we will ever need at once is 1.
     VkDescriptorPoolSize SSBOPoolSize{
         .type               = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         .descriptorCount    = 1
     };
     VkDescriptorPoolCreateInfo descriptorPoolCreateInfo{
         .sType          = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets        = 1, //Only need one descriptor set to be allocated.
-        .poolSizeCount  = 1,
+        .maxSets        = 1, // At most, we will only use one set at once.
+        .poolSizeCount  = 1, // We created one pool for the SSBO resource type.
         .pPoolSizes     = &SSBOPoolSize
     };
     VkDescriptorPool descriptorPool;
@@ -160,8 +183,11 @@ int main()
         0, nullptr);          // An array of VkCopyDescriptorSet objects (unused)
 
 
-    // Create the compute pipeline for the app.
-    // A compute pipeline is essentially just a compute shader.
+    /*
+    * ==============================================================================================
+    * Create the compute pipeline for the app.
+    * ==============================================================================================
+    */
 
     // Layout for the pipeline.
     VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{
@@ -182,14 +208,19 @@ int main()
         .layout = computePipelineLayout
     }; 
     VkPipeline computePipeline;
-    vkCreateComputePipelines(context,                 // Device
-        VK_NULL_HANDLE,          // Pipeline cache (uses default)
-        1, &pipelineCreateInfo,  // Compute pipeline create info
-        VK_NULL_HANDLE,          // Allocator (uses default)
+    vkCreateComputePipelines(context,       // Device
+        VK_NULL_HANDLE,                     // Pipeline cache (uses default)
+        1, &pipelineCreateInfo,             // Compute pipeline create info
+        VK_NULL_HANDLE,                     // Allocator (uses default)
         &computePipeline
-    );      // Output
+    );      
 
-
+    /*
+    * ==============================================================================================
+    * Create a command buffer to hold gpu commands.
+    * Use it to record the commands.
+    * ==============================================================================================
+    */
 
     // Create command pool for the compute queue.
     VkCommandPoolCreateInfo commanddPoolCreateInfo = {
@@ -216,7 +247,6 @@ int main()
         std::cerr << std::format("Failed to create Command buffer: {}\n", string_VkResult(result));
     }
     std::cout << "Command buffer created successfully!\n";
-
 
     VkCommandBufferBeginInfo commandBufferBeginInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -281,14 +311,22 @@ int main()
     }
     std::cout << "Compute queue has finished processing command buffer!\n";
 
-    // Map data from GPU to CPU to read it.
+    /*
+    * ==============================================================================================
+    * Write SSBO data to an external image.
+    * ==============================================================================================
+    */
     void* pData;
     vmaMapMemory(allocator, bufferAllocation, &pData);
     stbi_write_hdr("out.hdr", kImageWidth, kImageHeight, 3, reinterpret_cast<float*>(pData));
     vmaUnmapMemory(allocator, bufferAllocation);
 
 
-
+    /*
+    * ==============================================================================================
+    * Clean up Vulkan resources.
+    * ==============================================================================================
+    */
     vkDestroyPipeline(context, computePipeline, nullptr);
     vkDestroyShaderModule(context, computeShaderModule, nullptr);
     vkDestroyPipelineLayout(context, computePipelineLayout, nullptr);
