@@ -1,7 +1,7 @@
 ﻿
 
 # Add source to this project's executable.
-add_executable (VulkanComputePathTracer "main.cpp"  "model_loading.cpp" "tiny_obj_loader.h")
+add_executable (VulkanComputePathTracer "main.cpp"   "tiny_obj_loader.h")
 
 add_custom_command(
 	TARGET VulkanComputePathTracer POST_BUILD 
