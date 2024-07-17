@@ -13,13 +13,14 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "tiny_obj_loader.h"
 
-#include <vulkan/vulkan.h>
+#include <volk.h>
 #include <vulkan/vk_enum_string_helper.h>
 #include <VkBootstrap.h>
 #define VMA_IMPLEMENTATION
 #include "vk_mem_alloc.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
+
 
 
 static constexpr uint32_t kImageWidth{ 800 };
@@ -49,6 +50,8 @@ struct MeshData
 {
     std::vector<float>		mVertices;
     std::vector<uint32_t>	mIndices;
+
+    static constexpr uint32_t vertexSize() { return 3 * sizeof(float); }
 };
 
 VulkanContextData   initVulkan();
@@ -57,14 +60,14 @@ VkShaderModule      createShaderModule(VkDevice device, const std::string& path)
 MeshData            LoadMeshFromObj(const std::string& path);
 VkCommandBuffer     AllocateAndBeginOneTimeCommandBuffer(VkDevice device, VkCommandPool cmdPool);
 void                EndSubmitWaitAndFreeCommandBuffer(VkDevice device, VkQueue queue, VkCommandPool cmdPool, VkCommandBuffer& cmdBuffer);
-VkDeviceAddress GetBufferDeviceAddress(VkDevice device, VkBuffer buffer);
+VkDeviceAddress     GetBufferDeviceAddress(VkDevice device, VkBuffer buffer);
 
 int main()
 {
     // Setup vulkan.
-    VulkanContextData   context     = initVulkan();
+    VulkanContextData context       = initVulkan();
     // Setup memory allocator.
-    VmaAllocator        allocator   = initAllocator(context);
+    VmaAllocator allocator          = initAllocator(context);
 
     /*
     * ==============================================================================================
@@ -98,7 +101,8 @@ int main()
 
     /*
     * ==============================================================================================
-    * Create a command pool.
+    * Create a command pool for the compute queue.
+    * All command buffers in this app will be allocated from this pool.
     * ==============================================================================================
     */
     VkCommandPool commandPool;
@@ -206,6 +210,146 @@ int main()
         vmaDestroyBuffer(allocator, stagingBuffer, stagingBufferAllocation);
     }
 
+
+    /*
+    * ==============================================================================================
+    * Set up the BLAS.
+    * ==============================================================================================
+    */
+    VkAccelerationStructureKHR  blas;
+    VkBuffer                    blasBuffer;
+    VmaAllocation               blasBufferAlloc;
+    {
+        const VkDeviceAddress vertexBufferAddress   = GetBufferDeviceAddress(context, vertexBuffer);
+        const VkDeviceAddress indexBufferAddress    = GetBufferDeviceAddress(context, indexBuffer);
+        const uint32_t primitiveCount               = static_cast<uint32_t>(indices.size() / 3); // number of triangles in the mesh.
+
+
+        // First we query for the size of the Acceleration Structure.
+        VkAccelerationStructureBuildSizesInfoKHR    buildSizesInfo { .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
+        VkAccelerationStructureBuildGeometryInfoKHR buildGeometryInfo   = {};
+        VkAccelerationStructureBuildRangeInfoKHR    buildRangeInfo      = {};
+        {
+            // In order for vulkan to determine the size, we must specify details of the geometry that will make up the AS.
+            // In our case we have a triangle mesh. 
+            VkAccelerationStructureGeometryKHR AsGeometry = {};
+            {
+                AsGeometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+                AsGeometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+                AsGeometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+
+                // Specify some details of the the particular type of geometry (triangles in this case). 
+                VkAccelerationStructureGeometryTrianglesDataKHR triangles = {};
+                triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+                triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;  // each vertex position coordin
+                triangles.vertexData.deviceAddress = GetBufferDeviceAddress(context, vertexBuffer);
+                triangles.vertexStride = MeshData::vertexSize();
+                triangles.maxVertex = static_cast<uint32_t>(vertices.size() / 3 - 1);  // Number of vertices
+                triangles.indexType = VK_INDEX_TYPE_UINT32;  // Example: uint32 indices
+                triangles.indexData.deviceAddress = indexBufferAddress;
+
+                AsGeometry.geometry.triangles = triangles;
+
+            }
+
+            buildGeometryInfo = {
+                .sType          = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+                .type           = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, // We want a BLAS.
+                .flags          = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR,
+                .geometryCount  = 1,
+                .pGeometries    = &AsGeometry
+            };
+
+            // Create offset info that allows us to say how many triangles and vertices to read
+            // This is so we can use a subset
+            buildRangeInfo = {
+                .primitiveCount = primitiveCount,  // Number of triangles
+                .primitiveOffset = 0,
+                .firstVertex = 0,
+                .transformOffset = 0,
+            };
+
+            // Query build sizes from vulkan using geometry data.
+            // This fills in further members of buildSizesInfo.
+            vkGetAccelerationStructureBuildSizesKHR(
+                context,
+                VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                &buildGeometryInfo,
+                &primitiveCount,
+                &buildSizesInfo
+            );
+        }
+        
+
+        // Create the buffer that will store the BLAS.
+        {
+            VkBufferCreateInfo blasBufferCreateInfo = {};
+            blasBufferCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            blasBufferCreateInfo.size = buildSizesInfo.accelerationStructureSize;
+            blasBufferCreateInfo.usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
+            blasBufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            vkCreateBuffer(context, &blasBufferCreateInfo, nullptr, &blasBuffer);
+
+            // Set memory properties for the buffers.
+            VmaAllocationCreateInfo scratchBufferAllocInfo{
+                .usage = VMA_MEMORY_USAGE_AUTO
+            };
+            vmaCreateBuffer(allocator, &blasBufferCreateInfo, &scratchBufferAllocInfo, &blasBuffer, &blasBufferAlloc, nullptr);
+        }
+
+        // Create a temporary scratch buffer.
+        VkBuffer        scratchBuffer;
+        VmaAllocation   scratchBufferAlloc;
+        {
+            VkBufferCreateInfo scratchBufferCreateInfo = {};
+            scratchBufferCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            scratchBufferCreateInfo.size = buildSizesInfo.buildScratchSize;
+            scratchBufferCreateInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+            scratchBufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            vkCreateBuffer(context, &scratchBufferCreateInfo, nullptr, &scratchBuffer);
+
+            // Set memory properties for the buffers.
+            VmaAllocationCreateInfo scratchBufferAllocInfo{
+                .usage = VMA_MEMORY_USAGE_AUTO,
+                .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+            };
+            vmaCreateBuffer(allocator, &scratchBufferCreateInfo, &scratchBufferAllocInfo, &scratchBuffer, &scratchBufferAlloc, nullptr);
+        }
+        buildGeometryInfo.scratchData.deviceAddress = GetBufferDeviceAddress(context, scratchBuffer);
+
+        // Create the BLAS handle.
+        VkAccelerationStructureCreateInfoKHR blasCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,     // The type of accelleration structure to build.
+            .buffer = blasBuffer,      // The buffer where the AS will be stored. 
+            .size = buildSizesInfo.accelerationStructureSize,                     // Size of the AS.
+            .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR              //Type of the AS (BLAS in this case).
+        };
+        vkCreateAccelerationStructureKHR(context, &blasCreateInfo, nullptr, &blas);
+           
+
+        // Build the BLAS.
+        {
+            VkCommandBuffer cmdBuffer = AllocateAndBeginOneTimeCommandBuffer(context, commandPool);
+
+            const VkAccelerationStructureBuildRangeInfoKHR* pBuildRangeInfo = &buildRangeInfo;
+            vkCmdBuildAccelerationStructuresKHR(cmdBuffer, 1, &buildGeometryInfo, &pBuildRangeInfo);
+
+            EndSubmitWaitAndFreeCommandBuffer(context, context.mQueue, commandPool, cmdBuffer);
+        }
+
+        // We no longer need the scratch buffer.
+        vmaDestroyBuffer(allocator, scratchBuffer, scratchBufferAlloc);
+    }
+
+
+    /*
+    * ==============================================================================================
+    * Set up the TLAS.
+    * ==============================================================================================
+    */
+    {
+
+    }
     /*
     * ==============================================================================================
     * Load compute shader data from file.
@@ -346,41 +490,42 @@ int main()
     /*
     * ==============================================================================================
     * Allocate a command buffer from the command  pool.
-    * This command buffer records the compute dispatch.
+    * Use this command buffer to dispatch the compute shader.
+    * Add a pipeline barrier to synchronise.
     * ==============================================================================================
     */
+    {
+        // Create and start recording a command buffer
+        VkCommandBuffer commandBuffer = AllocateAndBeginOneTimeCommandBuffer(context, commandPool);
 
-    // Create and start recording a command buffer
-    VkCommandBuffer commandBuffer = AllocateAndBeginOneTimeCommandBuffer(context, commandPool);
-
-    // Bind the compute pipeline and dispatch the compute shader.
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
-    // Bind the descriptor set
-    vkCmdBindDescriptorSets(commandBuffer, 
-        VK_PIPELINE_BIND_POINT_COMPUTE,
-        computePipelineLayout,
-        0, 1,               //Index of starting set to bind to
-        &descriptorSet,     //Pointer to array of sets to bind.
-        0, nullptr);
-    vkCmdDispatch(commandBuffer, (uint32_t(kImageWidth) + kWorkGroupSizeX - 1) / kWorkGroupSizeX,
-        (uint32_t(kImageHeight) + kWorkGroupSizeY- 1) / kWorkGroupSizeY, 1);
+        // Bind the compute pipeline and dispatch the compute shader.
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
+        // Bind the descriptor set
+        vkCmdBindDescriptorSets(commandBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            computePipelineLayout,
+            0, 1,               //Index of starting set to bind to
+            &descriptorSet,     //Pointer to array of sets to bind.
+            0, nullptr);
+        vkCmdDispatch(commandBuffer, (uint32_t(kImageWidth) + kWorkGroupSizeX - 1) / kWorkGroupSizeX,
+            (uint32_t(kImageHeight) + kWorkGroupSizeY - 1) / kWorkGroupSizeY, 1);
 
 
-    // Insert a pipeline barrier that ensures GPU memory writes are available for the CPU to read.
-    VkMemoryBarrier memoryBarrier = {
-        .sType          = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-        .srcAccessMask  = VK_ACCESS_SHADER_WRITE_BIT,  // Make shader writes
-        .dstAccessMask  = VK_ACCESS_HOST_READ_BIT       // Readable by the CPU
-    };
-    vkCmdPipelineBarrier(commandBuffer,                                // The command buffer
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,           // From the transfer stage
-        VK_PIPELINE_STAGE_HOST_BIT,               // To the CPU
-        0,                                        // No special flags
-        1, &memoryBarrier,                        // Pass the single global memory barrier.
-        0, nullptr, 0, nullptr);                  // No image/buffer memory barriers.
+        // Insert a pipeline barrier that ensures GPU memory writes are available for the CPU to read.
+        VkMemoryBarrier memoryBarrier = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,  // Make shader writes
+            .dstAccessMask = VK_ACCESS_HOST_READ_BIT       // Readable by the CPU
+        };
+        vkCmdPipelineBarrier(commandBuffer,                                // The command buffer
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,           // From the transfer stage
+            VK_PIPELINE_STAGE_HOST_BIT,               // To the CPU
+            0,                                        // No special flags
+            1, &memoryBarrier,                        // Pass the single global memory barrier.
+            0, nullptr, 0, nullptr);                  // No image/buffer memory barriers.
 
-    EndSubmitWaitAndFreeCommandBuffer(context, context.mQueue, commandPool, commandBuffer);
-
+        EndSubmitWaitAndFreeCommandBuffer(context, context.mQueue, commandPool, commandBuffer);
+    }
 
     /*
     * ==============================================================================================
@@ -429,6 +574,11 @@ VulkanContextData initVulkan()
     vkb::Instance vkb_instance = inst_ret.value();
 
 
+    if (volkInitialize() != VK_SUCCESS) {
+        // Handle initialization failure
+    }
+    volkLoadInstance(vkb_instance);
+
     // Require these optional features from 1.2.
     VkPhysicalDeviceVulkan12Features features12{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
     features12.bufferDeviceAddress = true;
@@ -463,6 +613,8 @@ VulkanContextData initVulkan()
     }
     vkb::Device vkb_device = dev_ret.value();
 
+    volkLoadDevice(vkb_device);
+
     // Search device for a compute queue.
     const auto queue_ret = vkb_device.get_queue(vkb::QueueType::compute);
     if (!queue_ret) {
@@ -478,12 +630,18 @@ VulkanContextData initVulkan()
 
 VmaAllocator initAllocator(VulkanContextData& context)
 {
+    VmaVulkanFunctions f{
+            .vkGetInstanceProcAddr = vkGetInstanceProcAddr,
+            .vkGetDeviceProcAddr = vkGetDeviceProcAddr
+    };
+
     // Create memory allocator.
     VmaAllocatorCreateInfo allocatorInfo {
         .flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
         .physicalDevice = context.mPhysicalDevice,
         .device = context.mDevice,
-        .instance = context.mInstance
+        .pVulkanFunctions = &f,
+        .instance = context.mInstance,
     };
     VmaAllocator allocator;
     auto result = vmaCreateAllocator(&allocatorInfo, &allocator);

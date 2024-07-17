@@ -12,6 +12,7 @@ set_property(TARGET VulkanComputePathTracer PROPERTY VS_DEBUGGER_WORKING_DIRECTO
 
 target_link_libraries(VulkanComputePathTracer glfw)
 target_link_libraries(VulkanComputePathTracer vk-bootstrap)
+target_link_libraries(VulkanComputePathTracer volk)
 target_link_libraries(VulkanComputePathTracer ${Vulkan_LIBRARY})
 # Link Vulkan library
 #target_link_libraries(VulkanComputePathTracer Vulkan::Vulkan)

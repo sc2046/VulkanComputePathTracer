@@ -31,6 +31,8 @@ set(GLM_INCLUDE_DIRS   "${PROJECT_SOURCE_DIR}/external/glm/glm")
 set(STB_INCLUDE_DIRS   "${PROJECT_SOURCE_DIR}/external/stb")
 set(VKBOOTSTRAP_INCLUDE_DIRS   "${PROJECT_SOURCE_DIR}/external/vk-bootstrap")
 set(VMA_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/external/VulkanMemoryAllocator/include")
+set(VOLD_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/external/volk/include")
+
 
 find_package(Vulkan REQUIRED)
 
@@ -44,5 +46,6 @@ include_directories(
 )
 
 add_subdirectory("external/glfw")  
+add_subdirectory("external/volk")  
 add_subdirectory("external/vk-bootstrap")
 add_subdirectory("src")
